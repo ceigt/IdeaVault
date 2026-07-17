@@ -4,6 +4,8 @@ services:
       context: ./server
     restart: unless-stopped
     environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      OWNER_USERNAME: ${OWNER_USERNAME:-owner}
       SYNC_TOKEN: ${SYNC_TOKEN:?set SYNC_TOKEN in .env}
       DATA_KEY: ${DATA_KEY:?set DATA_KEY in .env}
       DATA_PATH: /data/notes.json

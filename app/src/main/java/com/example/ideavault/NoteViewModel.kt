@@ -22,6 +22,8 @@ data class SyncUiState(
     val configured: Boolean = false,
     val running: Boolean = false,
     val serverUrl: String = "",
+    val username: String = "",
+    val healthySynced: Boolean = false,
     val message: String = "尚未配置同步",
 )
 
@@ -139,8 +141,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         val snapshot = _notes.value
         viewModelScope.launch {
             try {
-                val remote = withContext(Dispatchers.IO) { syncClient.sync(config, snapshot) }
-                val remoteById = remote.associateBy { it.id }
+                val syncResult = withContext(Dispatchers.IO) { syncClient.sync(config, snapshot) }
+                val remoteById = syncResult.notes.associateBy { it.id }
                 val merged = (_notes.value.map { it.id } + remoteById.keys)
                     .distinct()
                     .mapNotNull { id ->
@@ -158,12 +160,16 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 _syncState.value = SyncUiState(
                     configured = true,
                     serverUrl = config.serverUrl,
+                    username = syncResult.username,
+                    healthySynced = true,
                     message = "自动同步完成 · ${merged.count { !it.deleted }} 条笔记",
                 )
             } catch (error: Exception) {
                 _syncState.value = SyncUiState(
                     configured = true,
                     serverUrl = config.serverUrl,
+                    username = _syncState.value.username,
+                    healthySynced = false,
                     message = "同步失败：${error.message ?: "未知错误"}",
                 )
             } finally {

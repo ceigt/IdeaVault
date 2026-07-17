@@ -1,61 +1,29 @@
-# IdeaVault 同步服务
+# IdeaVault 多用户同步服务
 
-服务端数据卷只保存 Android 客户端产生的 AES-GCM 密文、随机 IV、笔记 ID 和更新时间。加密密钥由 `.env` 中的 `DATA_KEY` 管理，并通过 HTTPS 提供给已认证设备；拥有 `.env` 的管理员理论上可以解密数据。
+同一台服务可供多人使用。每个用户拥有独立的用户名、访问令牌、数据密钥和笔记集合，用户令牌不能读取其他人的数据。`ADMIN_TOKEN` 只用于创建和列出账户，绝对不要填进 Android 应用或发给普通用户。
 
-## VPS 部署
+服务端数据卷保存 AES-GCM 密文和账户密钥。拥有 VPS 或数据卷管理权限的人理论上可以取得密钥，所以它不是零知识服务。请同时备份 `.env` 与数据卷。
 
-要求：一个已解析到 VPS 的域名、Docker Engine 和 Docker Compose Plugin，防火墙开放 80/443。
+## 首次部署（宿主机已有 Nginx）
+
+要求：域名已解析到 VPS；已安装 Docker Engine、Docker Compose Plugin 和 Nginx；防火墙开放 80/443，**不要**开放 18080。
+
+### 1. 下载并生成配置
 
 ```bash
+git clone https://github.com/ceigt/IdeaVault.git /opt/ideavault
+cd /opt/ideavault
 cp .env.example .env
-# 将 DOMAIN 改成你的域名
-# 分别执行下面两条命令，并把输出填入 .env
-openssl rand -hex 32
-openssl rand -base64 32
 
-docker compose up -d --build
-docker compose ps
-curl https://你的域名/v1/health
+openssl rand -hex 32     # 复制到 ADMIN_TOKEN
+openssl rand -hex 32     # 复制到 SYNC_TOKEN（owner 的个人令牌）
+openssl rand -base64 32  # 复制到 DATA_KEY（owner 的数据密钥）
+nano .env
 ```
 
-然后在 Android 应用的同步设置中填写：
+把 `DOMAIN` 改为实际域名；`OWNER_USERNAME` 可保留为 `owner`。三个密钥不能相同，`.env` 不要提交到 Git。`DATA_KEY` 一旦使用就不要更改。
 
-- 服务器地址：`https://你的域名`
-- 访问令牌：`.env` 中的 `SYNC_TOKEN`
-
-## 备份和升级
-
-备份数据卷：
-
-```bash
-docker compose stop api
-docker run --rm -v ideavault_ideavault_data:/data -v "$PWD":/backup alpine tar czf /backup/ideavault-data.tgz -C /data .
-docker compose start api
-```
-
-升级：
-
-```bash
-git pull
-docker compose up -d --build
-```
-
-请离线保存 `.env`。丢失或更改 `DATA_KEY` 后，服务器上的密文无法恢复。访问令牌可以轮换，但 `DATA_KEY` 不可轮换。
-## 使用宿主机 Nginx 反向代理
-
-如果 VPS 已运行 Nginx，不需要启动 Compose 内的 Caddy。Nginx 专用覆盖文件只把 API 发布到本机回环地址 `127.0.0.1:18080`，公网不能直接访问此端口。
-
-### 1. 准备配置
-
-```bash
-cp .env.example .env
-openssl rand -hex 32      # 填入 SYNC_TOKEN
-openssl rand -base64 32   # 填入 DATA_KEY
-```
-
-仍然建议在 `DOMAIN` 中填写实际同步域名。`DATA_KEY` 一旦开始同步就不能更改。
-
-### 2. 只启动 API
+### 2. 启动 API
 
 ```bash
 docker compose \
@@ -63,12 +31,13 @@ docker compose \
   -f docker-compose.nginx.yml \
   up -d --build api
 
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml ps
 curl http://127.0.0.1:18080/v1/health
 ```
 
-预期返回 `{"status":"ok"}`。不要把 18080 端口开放到防火墙公网入口。
+预期返回 `{"status":"ok"}`。
 
-### 3. 配置 Nginx
+### 3. 配置 Nginx 与 HTTPS
 
 ```bash
 sudo cp server/nginx-ideavault.conf.example /etc/nginx/sites-available/ideavault
@@ -76,45 +45,107 @@ sudo sed -i 's/notes.example.com/你的实际域名/g' /etc/nginx/sites-availabl
 sudo ln -s /etc/nginx/sites-available/ideavault /etc/nginx/sites-enabled/ideavault
 sudo nginx -t
 sudo systemctl reload nginx
-```
 
-如果发行版使用 `/etc/nginx/conf.d/`，直接把示例复制为 `/etc/nginx/conf.d/ideavault.conf`。
-
-### 4. 申请 HTTPS 证书
-
-Ubuntu/Debian 可使用 Certbot：
-
-```bash
 sudo apt update
 sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d 你的实际域名
 ```
 
-选择自动跳转到 HTTPS，然后验证：
+若发行版使用 `/etc/nginx/conf.d/`，把示例复制为 `/etc/nginx/conf.d/ideavault.conf`。验证公网入口：
 
 ```bash
 curl https://你的实际域名/v1/health
 set -a; . ./.env; set +a
-curl -sS -o /dev/null -w "%{http_code}\n" \
-  -H "Authorization: Bearer $SYNC_TOKEN" \
+curl -sS -H "Authorization: Bearer $SYNC_TOKEN" \
   https://你的实际域名/v1/config
 ```
 
-Android 应用中的服务器地址填写 `https://你的实际域名`，不要附加 `/v1`。
+配置 Android：服务器地址填 `https://你的实际域名`（不要附加 `/v1`），访问令牌填个人令牌。首次同步成功后右上角会显示 `owner`；点击后域名右侧出现绿色勾。
 
-### 常用维护命令
+## 创建朋友账户
+
+用户名仅允许 3–32 位小写字母、数字、下划线或短横线。以下命令会生成独立令牌和数据密钥：
 
 ```bash
-# 查看日志
+cd /opt/ideavault
+set -a; . ./.env; set +a
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"friend"}' \
+  https://你的实际域名/v1/admin/users
+unset ADMIN_TOKEN SYNC_TOKEN DATA_KEY
+```
+
+响应示例：
+
+```json
+{"username":"friend","accessToken":"一串新令牌"}
+```
+
+访问令牌只在创建时返回一次。通过安全渠道把“服务器地址 + 该令牌”发给朋友；不要发送 `ADMIN_TOKEN`、`SYNC_TOKEN`、`DATA_KEY` 或 `.env`。朋友安装同一个 APK 后填写这两项，他只能同步自己的笔记。
+
+列出账户（不会显示个人令牌）：
+
+```bash
+cd /opt/ideavault
+set -a; . ./.env; set +a
+curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://你的实际域名/v1/admin/users
+unset ADMIN_TOKEN SYNC_TOKEN DATA_KEY
+```
+
+## 从 1.2.0 升级到 2.0.0
+
+先备份，然后更新代码，并在现有 `.env` 中新增 `ADMIN_TOKEN` 和可选的 `OWNER_USERNAME=owner`。保留原来的 `SYNC_TOKEN`、`DATA_KEY` 和 Docker 数据卷：服务启动时会把旧笔记自动迁移到 owner，Android 端不需要重新输入配置。
+
+```bash
+cd /opt/ideavault
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml stop api
+
+docker run --rm \
+  -v ideavault_ideavault_data:/data \
+  -v "$PWD":/backup \
+  alpine tar czf /backup/ideavault-data-before-v2.tgz -C /data .
+
+openssl rand -hex 32  # 写入 .env 的 ADMIN_TOKEN
+git pull
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d --build api
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml logs --tail=100 api
+```
+
+如果 Compose 项目名不是 `ideavault`，先运行 `docker volume ls` 找到实际数据卷名。不要创建新的空卷替代旧卷。
+
+## 备份、升级和排错
+
+完整备份应包含 `.env` 和数据卷归档，并存到 VPS 之外。仅备份其中一个不足以恢复全部账户。
+
+```bash
+# 查看状态与日志
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml ps
 docker compose -f docker-compose.yml -f docker-compose.nginx.yml logs -f api
 
-# 升级并重建
+# 更新并重建
 git pull
 docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d --build api
 
-# 重启
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml restart api
+# 本机 API 与公网 HTTPS 检查
+curl http://127.0.0.1:18080/v1/health
+curl https://你的实际域名/v1/health
 ```
-## 从 1.1.0 升级
 
-1.2.0 改用服务器管理的 `DATA_KEY`，不兼容 1.1.0 的客户端口令密钥。如果服务器已经保存过 1.1.0 同步数据，请先在旧客户端保留本地完整笔记并做好备份，再使用新的空数据卷部署 1.2.0；不要直接删除唯一的数据副本。
+验证是否同步成功：在设备 A 新建一条测试笔记，等待右上角账户详情出现绿色勾；设备 B 使用**同一用户令牌**打开应用，笔记应出现。使用朋友令牌登录的设备不应看到 owner 的测试笔记，这同时验证了用户隔离。
+
+绿色勾表示该客户端最近一次完成了健康检查、令牌鉴权和笔记合并；网络中断或同步错误时会变成红色空心圆并显示错误信息。
+
+## 使用内置 Caddy（可选）
+
+如果 VPS 没有宿主机 Nginx，可直接运行：
+
+```bash
+docker compose up -d --build
+docker compose ps
+curl https://你的实际域名/v1/health
+```
+
+Compose 中的 Caddy 会监听 80/443 并自动申请 HTTPS 证书；不要与宿主机 Nginx 同时占用这些端口。

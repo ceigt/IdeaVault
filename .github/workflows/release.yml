@@ -34,6 +34,8 @@ jobs:
       - name: Validate Docker Compose
         env:
           DOMAIN: notes.example.com
+          ADMIN_TOKEN: abcdef0123456789abcdef0123456789
+          OWNER_USERNAME: owner
           SYNC_TOKEN: 0123456789abcdef0123456789abcdef
           DATA_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
         run: |

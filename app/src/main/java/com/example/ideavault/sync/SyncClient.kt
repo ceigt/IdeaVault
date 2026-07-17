@@ -12,13 +12,16 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+data class SyncResult(val notes: List<Note>, val username: String)
+
 class SyncClient {
-    fun sync(config: SyncConfig, localNotes: List<Note>): List<Note> {
+    fun sync(config: SyncConfig, localNotes: List<Note>): SyncResult {
         val baseUrl = config.serverUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("https://")) { "服务器地址必须使用 HTTPS" }
 
         val serverConfig = request("GET", "$baseUrl/v1/config", config.accessToken)
         val configJson = JSONObject(serverConfig)
+        val username = configJson.getString("username")
         val keyBytes = Base64.decode(configJson.getString("dataKey"), Base64.DEFAULT)
         require(keyBytes.size == 32) { "服务器 DATA_KEY 无效" }
         val key = SecretKeySpec(keyBytes, "AES")
@@ -33,11 +36,12 @@ class SyncClient {
         val payload = JSONObject().put("keyId", keyId).put("notes", outgoing).toString()
         val response = JSONObject(request("POST", "$baseUrl/v1/sync", config.accessToken, payload))
         val notes = response.getJSONArray("notes")
-        return buildList {
+        val decrypted = buildList {
             for (index in 0 until notes.length()) {
                 add(decryptEnvelope(notes.getJSONObject(index), key))
             }
         }
+        return SyncResult(decrypted, username)
     }
 
     private fun encryptEnvelope(note: Note, key: SecretKeySpec): JSONObject {

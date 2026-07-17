@@ -35,6 +35,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -55,6 +56,7 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var creating by rememberSaveable { mutableStateOf(false) }
     var showSyncSettings by rememberSaveable { mutableStateOf(false) }
+    var showServerStatus by rememberSaveable { mutableStateOf(false) }
     val editingNote = notes.firstOrNull { it.id == editingId }
 
     if (creating || editingNote != null) {
@@ -74,8 +76,7 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
             onOpen = { editingId = it.id },
             onPin = { viewModel.togglePinned(it.id) },
             onDelete = { viewModel.delete(it.id) },
-            onSync = { if (syncState.configured) viewModel.syncNow() else showSyncSettings = true },
-            onSyncSettings = { showSyncSettings = true },
+            onAccount = { if (syncState.configured) showServerStatus = true else showSyncSettings = true },
         )
     }
 
@@ -93,6 +94,18 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
             },
         )
     }
+
+    if (showServerStatus) {
+        ServerStatusDialog(
+            syncState = syncState,
+            onDismiss = { showServerStatus = false },
+            onSync = { viewModel.syncNow() },
+            onSettings = {
+                showServerStatus = false
+                showSyncSettings = true
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -104,8 +117,7 @@ private fun NoteListScreen(
     onOpen: (Note) -> Unit,
     onPin: (Note) -> Unit,
     onDelete: (Note) -> Unit,
-    onSync: () -> Unit,
-    onSyncSettings: () -> Unit,
+    onAccount: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<Note?>(null) }
@@ -126,10 +138,15 @@ private fun NoteListScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onSync, enabled = !syncState.running) {
-                        Text(if (syncState.running) "同步中" else "同步")
+                    TextButton(onClick = onAccount) {
+                        Text(
+                            when {
+                                syncState.username.isNotBlank() -> syncState.username
+                                syncState.configured -> "连接中"
+                                else -> "未登录"
+                            },
+                        )
                     }
-                    TextButton(onClick = onSyncSettings) { Text("设置") }
                 },
             )
         },
@@ -281,10 +298,10 @@ private fun SyncSettingsDialog(
     var token by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("端到端加密同步") },
+        title = { Text("多用户加密同步") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("新增、修改、置顶和删除后会自动同步。服务器使用 .env 中的 DATA_KEY 保存密文。")
+                Text("新增、修改、置顶和删除后会自动同步。个人访问令牌用于识别你的独立账户。")
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
@@ -306,6 +323,43 @@ private fun SyncSettingsDialog(
         },
         confirmButton = { TextButton(onClick = { onSave(serverUrl, token) }) { Text("保存并同步") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun ServerStatusDialog(
+    syncState: SyncUiState,
+    onDismiss: () -> Unit,
+    onSync: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(syncState.username.ifBlank { "同步账户" }) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = syncState.serverUrl.ifBlank { "未配置服务器" },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = if (syncState.healthySynced) "✓" else "○",
+                        color = if (syncState.healthySynced) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text(syncState.message, style = MaterialTheme.typography.bodyMedium)
+                Row {
+                    TextButton(onClick = onSync, enabled = !syncState.running) {
+                        Text(if (syncState.running) "同步中" else "立即同步")
+                    }
+                    TextButton(onClick = onSettings) { Text("修改配置") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
     )
 }
 
