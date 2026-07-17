@@ -54,3 +54,24 @@ func TestRejectsDuplicateInvalidAndWeakCredentials(t *testing.T) {
     if _, err := store.Register("valid_user", "long-enough-password"); err != nil { t.Fatal(err) }
     if _, err := store.Register("valid_user", "another-long-password"); err == nil { t.Fatal("duplicate username accepted") }
 }
+func TestNoteCountExcludesAndUpgradesDeletedTombstones(t *testing.T) {
+    store, err := NewStore(filepath.Join(t.TempDir(), "notes.json"))
+    if err != nil { t.Fatal(err) }
+    key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+    if err := store.BootstrapOwner("owner", "0123456789abcdef0123456789abcdef", key); err != nil { t.Fatal(err) }
+    iv := base64.StdEncoding.EncodeToString(make([]byte, 12))
+    keyID := base64.StdEncoding.EncodeToString(make([]byte, 32))
+    cipher := base64.StdEncoding.EncodeToString(make([]byte, 16))
+    notes := []Envelope{
+        {ID: "active", Ciphertext: cipher, IV: iv, UpdatedAt: 1},
+        {ID: "deleted", Ciphertext: cipher, IV: iv, UpdatedAt: 2},
+    }
+    if _, err := store.Merge("owner", keyID, notes); err != nil { t.Fatal(err) }
+    upgraded := notes[1]
+    upgraded.Deleted = true
+    merged, err := store.Merge("owner", keyID, []Envelope{upgraded})
+    if err != nil { t.Fatal(err) }
+    if !merged[1].Deleted { t.Fatal("legacy tombstone metadata was not upgraded") }
+    users := store.ListUsers()
+    if got := users[0]["noteCount"]; got != 1 { t.Fatalf("noteCount = %v, want 1", got) }
+}

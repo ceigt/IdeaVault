@@ -41,6 +41,7 @@ type Envelope struct {
     Ciphertext string `json:"ciphertext"`
     IV string `json:"iv"`
     UpdatedAt int64 `json:"updatedAt"`
+    Deleted bool `json:"deleted,omitempty"`
 }
 
 type SyncRequest struct {
@@ -186,12 +187,20 @@ func (s *Store) ListUsers() []map[string]any {
     for _, user := range s.users {
         result = append(result, map[string]any{
             "username": user.Username,
-            "noteCount": len(user.Notes),
+            "noteCount": activeNoteCount(user.Notes),
             "passwordEnabled": user.PasswordHash != "",
         })
     }
     sort.Slice(result, func(i, j int) bool { return result[i]["username"].(string) < result[j]["username"].(string) })
     return result
+}
+
+func activeNoteCount(notes map[string]Envelope) int {
+    count := 0
+    for _, note := range notes {
+        if !note.Deleted { count++ }
+    }
+    return count
 }
 
 func (s *Store) Authenticate(token string) (string, bool) {
@@ -228,7 +237,8 @@ func (s *Store) Merge(username, keyID string, incoming []Envelope) ([]Envelope, 
     for _, note := range incoming {
         if err := validateEnvelope(note); err != nil { return nil, err }
         current, exists := user.Notes[note.ID]
-        if !exists || note.UpdatedAt > current.UpdatedAt || (note.UpdatedAt == current.UpdatedAt && note.Ciphertext > current.Ciphertext) {
+        if !exists || note.UpdatedAt > current.UpdatedAt || (note.UpdatedAt == current.UpdatedAt && note.Ciphertext > current.Ciphertext) ||
+            (note.UpdatedAt == current.UpdatedAt && note.Ciphertext == current.Ciphertext && !current.Deleted && note.Deleted) {
             user.Notes[note.ID] = note
             changed = true
         }

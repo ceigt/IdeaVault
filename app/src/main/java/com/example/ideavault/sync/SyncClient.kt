@@ -73,6 +73,7 @@ class SyncClient {
             put("ciphertext", Base64.encodeToString(cipher.doFinal(plaintext), Base64.NO_WRAP))
             put("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             put("updatedAt", note.updatedAt)
+            put("deleted", note.deleted)
         }
     }
 

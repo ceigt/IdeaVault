@@ -133,7 +133,7 @@ unset OWNER_PASSWORD ADMIN_TOKEN SYNC_TOKEN DATA_KEY
 3. 设备 C 注册 `bob`，不应看到 `alice` 的笔记。
 4. 修改、删除笔记后，其他同账户设备应在启动或下一次同步时更新。
 
-管理员可查看账户列表，但看不到密码：
+管理员可查看账户列表，但看不到密码。`noteCount` 只统计当前有效笔记，不包含为防止旧设备恢复删除内容而保留的墓碑：
 
 ```bash
 cd /opt/ideavault
