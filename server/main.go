@@ -133,7 +133,7 @@ func validateEnvelope(note Envelope) error {
 
 type Server struct {
     token   string
-    kdfSalt string
+    dataKey string
     store   *Store
 }
 
@@ -160,8 +160,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func (s *Server) config(w http.ResponseWriter, _ *http.Request) {
     writeJSON(w, http.StatusOK, map[string]any{
-        "kdfSalt":       s.kdfSalt,
-        "kdfIterations": 310000,
+        "dataKey":      s.dataKey,
         "maxNoteBytes":  1 << 20,
     })
 }
@@ -211,10 +210,10 @@ func main() {
     if len(token) < 32 {
         log.Fatal("SYNC_TOKEN must contain at least 32 characters")
     }
-    salt := os.Getenv("KDF_SALT")
-    decodedSalt, err := base64.StdEncoding.DecodeString(salt)
-    if err != nil || len(decodedSalt) < 16 {
-        log.Fatal("KDF_SALT must be base64 containing at least 16 random bytes")
+    dataKey := os.Getenv("DATA_KEY")
+    decodedKey, err := base64.StdEncoding.DecodeString(dataKey)
+    if err != nil || len(decodedKey) != 32 {
+        log.Fatal("DATA_KEY must be base64 containing exactly 32 random bytes")
     }
     dataPath := os.Getenv("DATA_PATH")
     if dataPath == "" {
@@ -230,7 +229,7 @@ func main() {
     }
     server := &http.Server{
         Addr:              ":" + port,
-        Handler:           (&Server{token: token, kdfSalt: salt, store: store}).routes(),
+        Handler:           (&Server{token: token, dataKey: dataKey, store: store}).routes(),
         ReadHeaderTimeout: 5 * time.Second,
         ReadTimeout:       15 * time.Second,
         WriteTimeout:      30 * time.Second,

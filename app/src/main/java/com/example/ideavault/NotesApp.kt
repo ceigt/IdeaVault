@@ -83,8 +83,8 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
         SyncSettingsDialog(
             syncState = syncState,
             onDismiss = { showSyncSettings = false },
-            onSave = { url, token, passphrase ->
-                viewModel.configureAndSync(url, token, passphrase)
+            onSave = { url, token ->
+                viewModel.configureAndSync(url, token)
                 showSyncSettings = false
             },
             onClear = {
@@ -274,18 +274,17 @@ private fun EditorScreen(note: Note?, onSave: (String, String, Boolean) -> Unit)
 private fun SyncSettingsDialog(
     syncState: SyncUiState,
     onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit,
+    onSave: (String, String) -> Unit,
     onClear: () -> Unit,
 ) {
     var serverUrl by rememberSaveable { mutableStateOf(syncState.serverUrl) }
     var token by rememberSaveable { mutableStateOf("") }
-    var passphrase by rememberSaveable { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("端到端加密同步") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("服务器只保存密文。访问令牌来自 VPS 的 .env；加密口令不会发送到服务器。")
+                Text("新增、修改、置顶和删除后会自动同步。服务器使用 .env 中的 DATA_KEY 保存密文。")
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
@@ -300,19 +299,12 @@ private fun SyncSettingsDialog(
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                 )
-                OutlinedTextField(
-                    value = passphrase,
-                    onValueChange = { passphrase = it },
-                    label = { Text("加密口令（所有设备一致）") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                )
                 if (syncState.configured) {
                     TextButton(onClick = onClear) { Text("移除同步配置") }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(serverUrl, token, passphrase) }) { Text("保存并同步") } },
+        confirmButton = { TextButton(onClick = { onSave(serverUrl, token) }) { Text("保存并同步") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

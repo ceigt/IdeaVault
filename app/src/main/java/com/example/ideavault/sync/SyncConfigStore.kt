@@ -14,7 +14,6 @@ import javax.crypto.spec.GCMParameterSpec
 data class SyncConfig(
     val serverUrl: String,
     val accessToken: String,
-    val encryptionPassphrase: String,
 )
 
 class SyncConfigStore(context: Context) {
@@ -37,7 +36,6 @@ class SyncConfigStore(context: Context) {
             SyncConfig(
                 serverUrl = json.getString("serverUrl"),
                 accessToken = json.getString("accessToken"),
-                encryptionPassphrase = json.getString("encryptionPassphrase"),
             )
         }.getOrNull()
     }
@@ -47,11 +45,8 @@ class SyncConfigStore(context: Context) {
         val json = JSONObject().apply {
             put("serverUrl", config.serverUrl)
             put("accessToken", config.accessToken)
-            put("encryptionPassphrase", config.encryptionPassphrase)
         }.toString()
-        val cipher = Cipher.getInstance(TRANSFORMATION).apply {
-            init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        }
+        val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, getOrCreateKey()) }
         file.writeBytes(cipher.iv + cipher.doFinal(json.encodeToByteArray()))
     }
 

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       SYNC_TOKEN: ${SYNC_TOKEN:?set SYNC_TOKEN in .env}
-      KDF_SALT: ${KDF_SALT:?set KDF_SALT in .env}
+      DATA_KEY: ${DATA_KEY:?set DATA_KEY in .env}
       DATA_PATH: /data/notes.json
     volumes:
       - ideavault_data:/data

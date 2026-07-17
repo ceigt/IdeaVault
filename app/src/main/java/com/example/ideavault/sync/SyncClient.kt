@@ -9,9 +9,7 @@ import java.net.URL
 import java.security.MessageDigest
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 class SyncClient {
@@ -21,10 +19,9 @@ class SyncClient {
 
         val serverConfig = request("GET", "$baseUrl/v1/config", config.accessToken)
         val configJson = JSONObject(serverConfig)
-        val salt = Base64.decode(configJson.getString("kdfSalt"), Base64.DEFAULT)
-        val iterations = configJson.optInt("kdfIterations", DEFAULT_ITERATIONS)
-        require(salt.size >= 16 && iterations in 100_000..2_000_000) { "服务器加密参数无效" }
-        val key = deriveKey(config.encryptionPassphrase, salt, iterations)
+        val keyBytes = Base64.decode(configJson.getString("dataKey"), Base64.DEFAULT)
+        require(keyBytes.size == 32) { "服务器 DATA_KEY 无效" }
+        val key = SecretKeySpec(keyBytes, "AES")
 
         val outgoing = JSONArray().apply {
             localNotes.forEach { note -> put(encryptEnvelope(note, key)) }
@@ -87,17 +84,7 @@ class SyncClient {
                 deleted = json.optBoolean("deleted"),
             )
         } catch (error: AEADBadTagException) {
-            throw IllegalArgumentException("加密口令不正确，或服务器密文已损坏", error)
-        }
-    }
-
-    private fun deriveKey(passphrase: String, salt: ByteArray, iterations: Int): SecretKeySpec {
-        require(passphrase.length >= 8) { "加密口令至少需要 8 个字符" }
-        val spec = PBEKeySpec(passphrase.toCharArray(), salt, iterations, 256)
-        return try {
-            SecretKeySpec(SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded, "AES")
-        } finally {
-            spec.clearPassword()
+            throw IllegalArgumentException("服务器 DATA_KEY 不匹配，或密文已损坏", error)
         }
     }
 
@@ -130,6 +117,5 @@ class SyncClient {
     private companion object {
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val TAG_BITS = 128
-        const val DEFAULT_ITERATIONS = 310_000
     }
 }

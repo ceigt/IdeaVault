@@ -9,6 +9,8 @@ import com.example.ideavault.sync.SyncClient
 import com.example.ideavault.sync.SyncConfig
 import com.example.ideavault.sync.SyncConfigStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,19 +33,20 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     val notes: StateFlow<List<Note>> = _notes.asStateFlow()
     private val _syncState = MutableStateFlow(SyncUiState())
     val syncState: StateFlow<SyncUiState> = _syncState.asStateFlow()
+    private var autoSyncJob: Job? = null
+    private var syncRequestedWhileRunning = false
 
     init {
         viewModelScope.launch {
-            val loaded = withContext(Dispatchers.IO) {
-                store.load() to syncConfigStore.load()
-            }
+            val loaded = withContext(Dispatchers.IO) { store.load() to syncConfigStore.load() }
             _notes.value = loaded.first
             loaded.second?.let { config ->
                 _syncState.value = SyncUiState(
                     configured = true,
                     serverUrl = config.serverUrl,
-                    message = "已配置 · 点按同步",
+                    message = "自动同步已开启",
                 )
+                performSync(config)
             }
         }
     }
@@ -52,7 +55,6 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         val cleanTitle = title.trim()
         val cleanContent = content.trim()
         if (cleanTitle.isBlank() && cleanContent.isBlank()) return
-
         val now = System.currentTimeMillis()
         val current = _notes.value.toMutableList()
         val index = noteId?.let { id -> current.indexOfFirst { it.id == id } } ?: -1
@@ -86,46 +88,58 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(deleted = true, updatedAt = System.currentTimeMillis())
     }
 
-    fun configureAndSync(serverUrl: String, accessToken: String, encryptionPassphrase: String) {
+    fun configureAndSync(serverUrl: String, accessToken: String) {
         val config = SyncConfig(
             serverUrl = serverUrl.trim().trimEnd('/'),
             accessToken = accessToken.trim(),
-            encryptionPassphrase = encryptionPassphrase,
         )
-        if (config.serverUrl.isBlank() || config.accessToken.length < 16 || encryptionPassphrase.length < 8) {
-            _syncState.value = _syncState.value.copy(message = "请填写有效地址、访问令牌和至少 8 位加密口令")
+        if (!config.serverUrl.startsWith("https://") || config.accessToken.length < 32) {
+            _syncState.value = _syncState.value.copy(message = "请填写 HTTPS 地址和有效访问令牌")
             return
         }
         viewModelScope.launch(Dispatchers.IO) { syncConfigStore.save(config) }
-        _syncState.value = SyncUiState(true, serverUrl = config.serverUrl, message = "配置已保存")
+        _syncState.value = SyncUiState(true, serverUrl = config.serverUrl, message = "自动同步已开启")
         performSync(config)
     }
 
     fun syncNow() {
-        if (_syncState.value.running) return
+        if (_syncState.value.running) {
+            syncRequestedWhileRunning = true
+            return
+        }
         viewModelScope.launch {
             val config = withContext(Dispatchers.IO) { syncConfigStore.load() }
-            if (config == null) {
-                _syncState.value = SyncUiState(message = "请先配置同步服务器")
-            } else {
-                performSync(config)
-            }
+            if (config == null) _syncState.value = SyncUiState(message = "请先配置同步服务器")
+            else performSync(config)
         }
     }
 
     fun clearSyncConfig() {
+        autoSyncJob?.cancel()
+        syncRequestedWhileRunning = false
         viewModelScope.launch(Dispatchers.IO) { syncConfigStore.clear() }
         _syncState.value = SyncUiState(message = "同步配置已移除，本地笔记不受影响")
     }
 
+    private fun scheduleAutoSync() {
+        if (!_syncState.value.configured) return
+        autoSyncJob?.cancel()
+        autoSyncJob = viewModelScope.launch {
+            delay(AUTO_SYNC_DELAY_MS)
+            syncNow()
+        }
+    }
+
     private fun performSync(config: SyncConfig) {
-        if (_syncState.value.running) return
-        _syncState.value = _syncState.value.copy(running = true, message = "正在端到端加密同步…")
+        if (_syncState.value.running) {
+            syncRequestedWhileRunning = true
+            return
+        }
+        _syncState.value = _syncState.value.copy(running = true, message = "正在自动同步…")
         val snapshot = _notes.value
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) { syncClient.sync(config, snapshot) }
-            }.onSuccess { remote ->
+            try {
+                val remote = withContext(Dispatchers.IO) { syncClient.sync(config, snapshot) }
                 val remoteById = remote.associateBy { it.id }
                 val merged = (_notes.value.map { it.id } + remoteById.keys)
                     .distinct()
@@ -141,18 +155,22 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 _notes.value = merged
                 withContext(Dispatchers.IO) { store.save(merged) }
-                val count = merged.count { !it.deleted }
                 _syncState.value = SyncUiState(
                     configured = true,
                     serverUrl = config.serverUrl,
-                    message = "同步完成 · $count 条笔记",
+                    message = "自动同步完成 · ${merged.count { !it.deleted }} 条笔记",
                 )
-            }.onFailure { error ->
+            } catch (error: Exception) {
                 _syncState.value = SyncUiState(
                     configured = true,
                     serverUrl = config.serverUrl,
                     message = "同步失败：${error.message ?: "未知错误"}",
                 )
+            } finally {
+                if (syncRequestedWhileRunning) {
+                    syncRequestedWhileRunning = false
+                    scheduleAutoSync()
+                }
             }
         }
     }
@@ -164,5 +182,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private fun updateAndPersist(value: List<Note>) {
         _notes.value = value
         viewModelScope.launch(Dispatchers.IO) { store.save(value) }
+        scheduleAutoSync()
+    }
+
+    private companion object {
+        const val AUTO_SYNC_DELAY_MS = 900L
     }
 }
