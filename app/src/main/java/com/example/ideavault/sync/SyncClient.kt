@@ -13,8 +13,20 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 data class SyncResult(val notes: List<Note>, val username: String)
+data class AuthResult(val accessToken: String, val username: String)
 
 class SyncClient {
+    fun authenticate(serverUrl: String, username: String, password: String, register: Boolean): AuthResult {
+        val baseUrl = serverUrl.trim().trimEnd('/')
+        require(baseUrl.startsWith("https://")) { "服务器地址必须使用 HTTPS" }
+        val endpoint = if (register) "register" else "login"
+        val payload = JSONObject()
+            .put("username", username.trim())
+            .put("password", password)
+            .toString()
+        val response = JSONObject(request("POST", "$baseUrl/v1/auth/$endpoint", body = payload))
+        return AuthResult(response.getString("accessToken"), response.getString("username"))
+    }
     fun sync(config: SyncConfig, localNotes: List<Note>): SyncResult {
         val baseUrl = config.serverUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("https://")) { "服务器地址必须使用 HTTPS" }
@@ -92,13 +104,13 @@ class SyncClient {
         }
     }
 
-    private fun request(method: String, url: String, token: String, body: String? = null): String {
+    private fun request(method: String, url: String, token: String? = null, body: String? = null): String {
         val connection = URL(url).openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = method
             connection.connectTimeout = 15_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("Authorization", "Bearer $token")
+            if (token != null) connection.setRequestProperty("Authorization", "Bearer $token")
             connection.setRequestProperty("Accept", "application/json")
             if (body != null) {
                 connection.doOutput = true

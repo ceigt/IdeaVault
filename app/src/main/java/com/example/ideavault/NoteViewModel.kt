@@ -90,6 +90,52 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(deleted = true, updatedAt = System.currentTimeMillis())
     }
 
+    fun authenticateAndSync(serverUrl: String, username: String, password: String, register: Boolean) {
+        val normalizedUrl = serverUrl.trim().trimEnd('/')
+        val normalizedUsername = username.trim().lowercase()
+        if (!normalizedUrl.startsWith("https://")) {
+            _syncState.value = _syncState.value.copy(healthySynced = false, message = "服务器地址必须使用 HTTPS")
+            return
+        }
+        if (!normalizedUsername.matches(Regex("[a-z0-9][a-z0-9_-]{2,31}"))) {
+            _syncState.value = _syncState.value.copy(healthySynced = false, message = "用户名格式不正确")
+            return
+        }
+        if (password.length !in 10..128) {
+            _syncState.value = _syncState.value.copy(healthySynced = false, message = "密码长度须为 10–128 个字符")
+            return
+        }
+        val previous = _syncState.value
+        _syncState.value = SyncUiState(
+            running = true,
+            serverUrl = normalizedUrl,
+            username = normalizedUsername,
+            message = if (register) "正在注册…" else "正在登录…",
+        )
+        viewModelScope.launch {
+            try {
+                val auth = withContext(Dispatchers.IO) {
+                    syncClient.authenticate(normalizedUrl, normalizedUsername, password, register)
+                }
+                val config = SyncConfig(normalizedUrl, auth.accessToken)
+                withContext(Dispatchers.IO) { syncConfigStore.save(config) }
+                _syncState.value = SyncUiState(
+                    configured = true,
+                    serverUrl = normalizedUrl,
+                    username = auth.username,
+                    message = if (register) "注册成功，准备同步" else "登录成功，准备同步",
+                )
+                performSync(config)
+            } catch (error: Exception) {
+                _syncState.value = previous.copy(
+                    running = false,
+                    healthySynced = false,
+                    message = "${if (register) "注册" else "登录"}失败：${error.message ?: "未知错误"}",
+                )
+            }
+        }
+    }
+
     fun configureAndSync(serverUrl: String, accessToken: String) {
         val config = SyncConfig(
             serverUrl = serverUrl.trim().trimEnd('/'),

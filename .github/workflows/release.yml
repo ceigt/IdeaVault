@@ -36,11 +36,13 @@ jobs:
           DOMAIN: notes.example.com
           ADMIN_TOKEN: abcdef0123456789abcdef0123456789
           OWNER_USERNAME: owner
+          ALLOW_REGISTRATION: true
           SYNC_TOKEN: 0123456789abcdef0123456789abcdef
           DATA_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
         run: |
           docker compose config --quiet
           docker compose -f docker-compose.yml -f docker-compose.nginx.yml config --quiet
+          docker compose build api
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:

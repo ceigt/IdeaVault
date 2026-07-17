@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -84,8 +86,8 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
         SyncSettingsDialog(
             syncState = syncState,
             onDismiss = { showSyncSettings = false },
-            onSave = { url, token ->
-                viewModel.configureAndSync(url, token)
+            onAuthenticate = { url, username, password, register ->
+                viewModel.authenticateAndSync(url, username, password, register)
                 showSyncSettings = false
             },
             onClear = {
@@ -291,17 +293,36 @@ private fun EditorScreen(note: Note?, onSave: (String, String, Boolean) -> Unit)
 private fun SyncSettingsDialog(
     syncState: SyncUiState,
     onDismiss: () -> Unit,
-    onSave: (String, String) -> Unit,
+    onAuthenticate: (String, String, String, Boolean) -> Unit,
     onClear: () -> Unit,
 ) {
     var serverUrl by rememberSaveable { mutableStateOf(syncState.serverUrl) }
-    var token by rememberSaveable { mutableStateOf("") }
+    var username by rememberSaveable { mutableStateOf(syncState.username) }
+    var password by rememberSaveable { mutableStateOf("") }
+    var confirmPassword by rememberSaveable { mutableStateOf("") }
+    var registerMode by rememberSaveable { mutableStateOf(false) }
+    var validationMessage by rememberSaveable { mutableStateOf("") }
+    val submit = {
+        validationMessage = when {
+            !serverUrl.trim().startsWith("https://") -> "服务器地址必须使用 HTTPS"
+            !username.trim().lowercase().matches(Regex("[a-z0-9][a-z0-9_-]{2,31}")) -> "用户名格式不正确"
+            password.length !in 10..128 -> "密码长度须为 10–128 个字符"
+            registerMode && password != confirmPassword -> "两次输入的密码不一致"
+            else -> ""
+        }
+        if (validationMessage.isBlank()) {
+            onAuthenticate(serverUrl, username, password, registerMode)
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("多用户加密同步") },
+        title = { Text(if (registerMode) "注册同步账户" else "登录同步账户") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("新增、修改、置顶和删除后会自动同步。个人访问令牌用于识别你的独立账户。")
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Text(if (registerMode) "设置自己的用户名和密码，注册后会自动登录并同步。" else "使用用户名和密码登录；密码不会保存在设备上。")
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
@@ -310,22 +331,49 @@ private fun SyncSettingsDialog(
                     singleLine = true,
                 )
                 OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
-                    label = { Text("访问令牌") },
+                    value = username,
+                    onValueChange = { username = it.lowercase() },
+                    label = { Text("用户名") },
+                    supportingText = { Text("3–32 位小写字母、数字、_ 或 -") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("密码") },
+                    supportingText = { Text("至少 10 个字符") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                 )
+                if (registerMode) {
+                    OutlinedTextField(
+                        value = confirmPassword,
+                        onValueChange = { confirmPassword = it },
+                        label = { Text("确认密码") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                }
+                if (validationMessage.isNotBlank()) {
+                    Text(validationMessage, color = MaterialTheme.colorScheme.error)
+                }
+                TextButton(onClick = {
+                    registerMode = !registerMode
+                    validationMessage = ""
+                }) {
+                    Text(if (registerMode) "已有账户？返回登录" else "没有账户？立即注册")
+                }
                 if (syncState.configured) {
-                    TextButton(onClick = onClear) { Text("移除同步配置") }
+                    TextButton(onClick = onClear) { Text("退出当前同步账户") }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(serverUrl, token) }) { Text("保存并同步") } },
+        confirmButton = {
+            TextButton(onClick = submit) { Text(if (registerMode) "注册并同步" else "登录并同步") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
-
 @Composable
 private fun ServerStatusDialog(
     syncState: SyncUiState,

@@ -11,58 +11,65 @@ import (
     "errors"
     "fmt"
     "log"
+    "net"
     "net/http"
     "os"
     "path/filepath"
     "regexp"
     "sort"
+    "strconv"
     "strings"
     "sync"
     "time"
+
+    "golang.org/x/crypto/argon2"
 )
 
-const maxBodyBytes = 10 << 20
+const (
+    maxBodyBytes = 10 << 20
+    maxSessions = 10
+    argonTime uint32 = 2
+    argonMemory uint32 = 32 * 1024
+    argonThreads uint8 = 1
+    argonKeyLength uint32 = 32
+)
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{2,31}$`)
 
 type Envelope struct {
-    ID         string `json:"id"`
+    ID string `json:"id"`
     Ciphertext string `json:"ciphertext"`
-    IV         string `json:"iv"`
-    UpdatedAt  int64  `json:"updatedAt"`
+    IV string `json:"iv"`
+    UpdatedAt int64 `json:"updatedAt"`
 }
 
 type SyncRequest struct {
-    KeyID string     `json:"keyId"`
+    KeyID string `json:"keyId"`
     Notes []Envelope `json:"notes"`
 }
 
 type SyncResponse struct {
-    Notes      []Envelope `json:"notes"`
-    ServerTime int64      `json:"serverTime"`
+    Notes []Envelope `json:"notes"`
+    ServerTime int64 `json:"serverTime"`
 }
 
 type UserRecord struct {
-    Username  string              `json:"username"`
-    TokenHash string              `json:"tokenHash"`
-    DataKey   string              `json:"dataKey"`
-    KeyID     string              `json:"keyId,omitempty"`
-    Notes     map[string]Envelope `json:"notes"`
-}
-
-type diskState struct {
-    Users map[string]*UserRecord `json:"users"`
-}
-
-type legacyDiskState struct {
-    KeyID string              `json:"keyId"`
+    Username string `json:"username"`
+    TokenHash string `json:"tokenHash,omitempty"`
+    SessionHashes []string `json:"sessionHashes,omitempty"`
+    PasswordHash string `json:"passwordHash,omitempty"`
+    DataKey string `json:"dataKey"`
+    KeyID string `json:"keyId,omitempty"`
     Notes map[string]Envelope `json:"notes"`
 }
 
+type diskState struct { Users map[string]*UserRecord `json:"users"` }
+type legacyDiskState struct { KeyID string `json:"keyId"`; Notes map[string]Envelope `json:"notes"` }
+
 type Store struct {
-    mu     sync.Mutex
-    path   string
-    users  map[string]*UserRecord
+    mu sync.Mutex
+    path string
+    users map[string]*UserRecord
     legacy *legacyDiskState
 }
 
@@ -73,7 +80,6 @@ func NewStore(path string) (*Store, error) {
     if errors.Is(err, os.ErrNotExist) { return store, nil }
     if err != nil { return nil, err }
     if len(data) == 0 { return store, nil }
-
     var state diskState
     if err := json.Unmarshal(data, &state); err == nil && state.Users != nil {
         store.users = state.Users
@@ -83,9 +89,7 @@ func NewStore(path string) (*Store, error) {
         return store, nil
     }
     var legacy legacyDiskState
-    if err := json.Unmarshal(data, &legacy); err != nil {
-        return nil, fmt.Errorf("decode store: %w", err)
-    }
+    if err := json.Unmarshal(data, &legacy); err != nil { return nil, fmt.Errorf("decode store: %w", err) }
     if legacy.Notes == nil { legacy.Notes = make(map[string]Envelope) }
     store.legacy = &legacy
     return store, nil
@@ -96,7 +100,6 @@ func (s *Store) BootstrapOwner(username, token, dataKey string) error {
     if err := validateUsername(username); err != nil { return err }
     if len(token) < 32 { return errors.New("SYNC_TOKEN must contain at least 32 characters") }
     if err := validateDataKey(dataKey); err != nil { return err }
-
     s.mu.Lock()
     defer s.mu.Unlock()
     record, exists := s.users[username]
@@ -109,34 +112,71 @@ func (s *Store) BootstrapOwner(username, token, dataKey string) error {
         }
         s.users[username] = record
     }
-    if record.DataKey != "" && record.DataKey != dataKey && len(record.Notes) > 0 {
-        return errors.New("DATA_KEY does not match existing owner data")
-    }
+    if record.DataKey != "" && record.DataKey != dataKey && len(record.Notes) > 0 { return errors.New("DATA_KEY does not match existing owner data") }
     record.TokenHash = hashToken(token)
     record.DataKey = dataKey
     return s.saveLocked()
 }
 
-func (s *Store) CreateUser(username string) (string, error) {
+func (s *Store) Register(username, password string) (string, error) {
     username = normalizeUsername(username)
     if err := validateUsername(username); err != nil { return "", err }
-    tokenBytes := make([]byte, 32)
+    if err := validatePassword(password); err != nil { return "", err }
+    passwordHash, err := hashPassword(password)
+    if err != nil { return "", err }
+    token, tokenHash, err := newSessionToken()
+    if err != nil { return "", err }
     keyBytes := make([]byte, 32)
-    if _, err := rand.Read(tokenBytes); err != nil { return "", err }
     if _, err := rand.Read(keyBytes); err != nil { return "", err }
-    token := hex.EncodeToString(tokenBytes)
-
     s.mu.Lock()
     defer s.mu.Unlock()
-    if _, exists := s.users[username]; exists { return "", errors.New("username already exists") }
+    if _, exists := s.users[username]; exists { return "", errors.New("用户名已存在") }
     s.users[username] = &UserRecord{
         Username: username,
-        TokenHash: hashToken(token),
+        SessionHashes: []string{tokenHash},
+        PasswordHash: passwordHash,
         DataKey: base64.StdEncoding.EncodeToString(keyBytes),
         Notes: make(map[string]Envelope),
     }
+    if err := s.saveLocked(); err != nil { delete(s.users, username); return "", err }
+    return token, nil
+}
+
+func (s *Store) Login(username, password string) (string, error) {
+    username = normalizeUsername(username)
+    if err := validateUsername(username); err != nil { return "", errors.New("用户名或密码错误") }
+    s.mu.Lock()
+    user, exists := s.users[username]
+    encodedHash := ""
+    if exists { encodedHash = user.PasswordHash }
+    s.mu.Unlock()
+    if encodedHash == "" {
+        argon2.IDKey([]byte(password), make([]byte, 16), argonTime, argonMemory, argonThreads, argonKeyLength)
+        return "", errors.New("用户名或密码错误")
+    }
+    if !verifyPassword(password, encodedHash) { return "", errors.New("用户名或密码错误") }
+    token, tokenHash, err := newSessionToken()
+    if err != nil { return "", err }
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    user, exists = s.users[username]
+    if !exists || user.PasswordHash != encodedHash { return "", errors.New("用户名或密码错误") }
+    user.SessionHashes = append(user.SessionHashes, tokenHash)
+    if len(user.SessionHashes) > maxSessions { user.SessionHashes = user.SessionHashes[len(user.SessionHashes)-maxSessions:] }
     if err := s.saveLocked(); err != nil { return "", err }
     return token, nil
+}
+
+func (s *Store) SetPassword(username, password string) error {
+    if err := validatePassword(password); err != nil { return err }
+    encodedHash, err := hashPassword(password)
+    if err != nil { return err }
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    user, exists := s.users[username]
+    if !exists { return errors.New("unknown user") }
+    user.PasswordHash = encodedHash
+    return s.saveLocked()
 }
 
 func (s *Store) ListUsers() []map[string]any {
@@ -144,7 +184,11 @@ func (s *Store) ListUsers() []map[string]any {
     defer s.mu.Unlock()
     result := make([]map[string]any, 0, len(s.users))
     for _, user := range s.users {
-        result = append(result, map[string]any{"username": user.Username, "noteCount": len(user.Notes)})
+        result = append(result, map[string]any{
+            "username": user.Username,
+            "noteCount": len(user.Notes),
+            "passwordEnabled": user.PasswordHash != "",
+        })
     }
     sort.Slice(result, func(i, j int) bool { return result[i]["username"].(string) < result[j]["username"].(string) })
     return result
@@ -155,8 +199,9 @@ func (s *Store) Authenticate(token string) (string, bool) {
     s.mu.Lock()
     defer s.mu.Unlock()
     for username, user := range s.users {
-        if len(supplied) == len(user.TokenHash) && subtle.ConstantTimeCompare([]byte(supplied), []byte(user.TokenHash)) == 1 {
-            return username, true
+        if secureHashEqual(supplied, user.TokenHash) { return username, true }
+        for _, sessionHash := range user.SessionHashes {
+            if secureHashEqual(supplied, sessionHash) { return username, true }
         }
     }
     return "", false
@@ -183,15 +228,12 @@ func (s *Store) Merge(username, keyID string, incoming []Envelope) ([]Envelope, 
     for _, note := range incoming {
         if err := validateEnvelope(note); err != nil { return nil, err }
         current, exists := user.Notes[note.ID]
-        if !exists || note.UpdatedAt > current.UpdatedAt ||
-            (note.UpdatedAt == current.UpdatedAt && note.Ciphertext > current.Ciphertext) {
+        if !exists || note.UpdatedAt > current.UpdatedAt || (note.UpdatedAt == current.UpdatedAt && note.Ciphertext > current.Ciphertext) {
             user.Notes[note.ID] = note
             changed = true
         }
     }
-    if changed {
-        if err := s.saveLocked(); err != nil { return nil, err }
-    }
+    if changed { if err := s.saveLocked(); err != nil { return nil, err } }
     result := make([]Envelope, 0, len(user.Notes))
     for _, note := range user.Notes { result = append(result, note) }
     sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
@@ -222,38 +264,126 @@ func validateDataKey(value string) error {
 }
 
 func validateUsername(username string) error {
-    if !usernamePattern.MatchString(username) { return errors.New("username must be 3-32 lowercase letters, numbers, _ or -") }
+    if !usernamePattern.MatchString(username) { return errors.New("用户名须为 3–32 位小写字母、数字、下划线或短横线") }
     return nil
+}
+
+func validatePassword(password string) error {
+    if len(password) < 10 || len(password) > 128 { return errors.New("密码长度须为 10–128 个字符") }
+    return nil
+}
+
+func hashPassword(password string) (string, error) {
+    salt := make([]byte, 16)
+    if _, err := rand.Read(salt); err != nil { return "", err }
+    hash := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLength)
+    return fmt.Sprintf("v=1$%d$%d$%d$%s$%s", argonTime, argonMemory, argonThreads, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
+}
+
+func verifyPassword(password, encoded string) bool {
+    parts := strings.Split(encoded, "$")
+    if len(parts) != 6 || parts[0] != "v=1" { return false }
+    timeValue, err1 := strconv.ParseUint(parts[1], 10, 32)
+    memoryValue, err2 := strconv.ParseUint(parts[2], 10, 32)
+    threadValue, err3 := strconv.ParseUint(parts[3], 10, 8)
+    salt, err4 := base64.RawStdEncoding.DecodeString(parts[4])
+    expected, err5 := base64.RawStdEncoding.DecodeString(parts[5])
+    if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || len(salt) != 16 || len(expected) != int(argonKeyLength) { return false }
+    if timeValue < 1 || timeValue > 5 || memoryValue < 8*1024 || memoryValue > 64*1024 || threadValue < 1 || threadValue > 4 { return false }
+    actual := argon2.IDKey([]byte(password), salt, uint32(timeValue), uint32(memoryValue), uint8(threadValue), uint32(len(expected)))
+    return subtle.ConstantTimeCompare(actual, expected) == 1
+}
+
+func newSessionToken() (string, string, error) {
+    tokenBytes := make([]byte, 32)
+    if _, err := rand.Read(tokenBytes); err != nil { return "", "", err }
+    token := hex.EncodeToString(tokenBytes)
+    return token, hashToken(token), nil
 }
 
 func normalizeUsername(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
 func hashToken(token string) string { sum := sha256.Sum256([]byte(token)); return hex.EncodeToString(sum[:]) }
+func secureHashEqual(left, right string) bool { return len(left) == len(right) && subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1 }
 
 type contextKey string
 const usernameContextKey contextKey = "username"
 
+type authAttempt struct { windowStart time.Time; count int }
+
 type Server struct {
     adminToken string
-    store      *Store
+    registrationEnabled bool
+    store *Store
+    attemptMu sync.Mutex
+    attempts map[string]authAttempt
 }
 
 func (s *Server) routes() http.Handler {
+    if s.attempts == nil { s.attempts = make(map[string]authAttempt) }
     mux := http.NewServeMux()
-    mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
-        writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-    })
+    mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}) })
+    mux.HandleFunc("POST /v1/auth/register", s.register)
+    mux.HandleFunc("POST /v1/auth/login", s.login)
+    mux.Handle("POST /v1/auth/password", s.userAuth(http.HandlerFunc(s.setPassword)))
     mux.Handle("GET /v1/config", s.userAuth(http.HandlerFunc(s.config)))
     mux.Handle("POST /v1/sync", s.userAuth(http.HandlerFunc(s.sync)))
     mux.Handle("GET /v1/admin/users", s.adminAuth(http.HandlerFunc(s.listUsers)))
-    mux.Handle("POST /v1/admin/users", s.adminAuth(http.HandlerFunc(s.createUser)))
     return securityHeaders(mux)
+}
+
+func (s *Server) allowAuthAttempt(r *http.Request) bool {
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil { host = r.RemoteAddr }
+    if forwarded := strings.TrimSpace(r.Header.Get("X-Real-IP")); forwarded != "" { host = forwarded }
+    now := time.Now()
+    s.attemptMu.Lock()
+    defer s.attemptMu.Unlock()
+    if len(s.attempts) > 10000 {
+        for address, existing := range s.attempts {
+            if now.Sub(existing.windowStart) >= time.Minute { delete(s.attempts, address) }
+        }
+    }
+    attempt := s.attempts[host]
+    if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) >= time.Minute { attempt = authAttempt{windowStart: now} }
+    attempt.count++
+    s.attempts[host] = attempt
+    return attempt.count <= 20
+}
+
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+    if !s.registrationEnabled { writeJSON(w, http.StatusForbidden, map[string]string{"error": "服务器已关闭新用户注册"}); return }
+    if !s.allowAuthAttempt(r) { writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "尝试次数过多，请稍后再试"}); return }
+    username, password, ok := decodeCredentials(w, r)
+    if !ok { return }
+    token, err := s.store.Register(username, password)
+    if err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()}); return }
+    writeJSON(w, http.StatusCreated, map[string]string{"username": normalizeUsername(username), "accessToken": token})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+    if !s.allowAuthAttempt(r) { writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "尝试次数过多，请稍后再试"}); return }
+    username, password, ok := decodeCredentials(w, r)
+    if !ok { return }
+    token, err := s.store.Login(username, password)
+    if err != nil { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()}); return }
+    writeJSON(w, http.StatusOK, map[string]string{"username": normalizeUsername(username), "accessToken": token})
+}
+
+func decodeCredentials(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+    r.Body = http.MaxBytesReader(w, r.Body, 4096)
+    defer r.Body.Close()
+    var request struct { Username string `json:"username"`; Password string `json:"password"` }
+    decoder := json.NewDecoder(r.Body)
+    decoder.DisallowUnknownFields()
+    if err := decoder.Decode(&request); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"}); return "", "", false }
+    return request.Username, request.Password, true
 }
 
 func (s *Server) userAuth(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
         username, ok := s.store.Authenticate(token)
-        if !ok { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
+        if !ok { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "登录已失效，请重新登录"}); return }
         next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), usernameContextKey, username)))
     })
 }
@@ -261,14 +391,21 @@ func (s *Server) userAuth(next http.Handler) http.Handler {
 func (s *Server) adminAuth(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         supplied := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-        if len(supplied) != len(s.adminToken) || subtle.ConstantTimeCompare([]byte(supplied), []byte(s.adminToken)) != 1 {
-            writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return
-        }
+        if !secureHashEqual(supplied, s.adminToken) { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"}); return }
         next.ServeHTTP(w, r)
     })
 }
 
 func requestUsername(r *http.Request) string { value, _ := r.Context().Value(usernameContextKey).(string); return value }
+
+func (s *Server) setPassword(w http.ResponseWriter, r *http.Request) {
+    r.Body = http.MaxBytesReader(w, r.Body, 4096)
+    defer r.Body.Close()
+    var request struct { Password string `json:"password"` }
+    if err := json.NewDecoder(r.Body).Decode(&request); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请求格式错误"}); return }
+    if err := s.store.SetPassword(requestUsername(r), request.Password); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()}); return }
+    writeJSON(w, http.StatusOK, map[string]string{"status": "password-set"})
+}
 
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
     username := requestUsername(r)
@@ -290,17 +427,6 @@ func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
     writeJSON(w, http.StatusOK, SyncResponse{Notes: notes, ServerTime: time.Now().UnixMilli()})
 }
 
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-    r.Body = http.MaxBytesReader(w, r.Body, 4096)
-    defer r.Body.Close()
-    var request struct { Username string `json:"username"` }
-    if err := json.NewDecoder(r.Body).Decode(&request); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"}); return }
-    username := normalizeUsername(request.Username)
-    token, err := s.store.CreateUser(username)
-    if err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()}); return }
-    writeJSON(w, http.StatusCreated, map[string]string{"username": username, "accessToken": token})
-}
-
 func (s *Server) listUsers(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"users": s.store.ListUsers()}) }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -317,25 +443,29 @@ func writeJSON(w http.ResponseWriter, status int, value any) { w.WriteHeader(sta
 func main() {
     adminToken := os.Getenv("ADMIN_TOKEN")
     if len(adminToken) < 32 { log.Fatal("ADMIN_TOKEN must contain at least 32 characters") }
-    ownerToken := os.Getenv("SYNC_TOKEN")
-    dataKey := os.Getenv("DATA_KEY")
     dataPath := os.Getenv("DATA_PATH")
     if dataPath == "" { dataPath = "/data/notes.json" }
     store, err := NewStore(dataPath)
     if err != nil { log.Fatal(err) }
     ownerUsername := os.Getenv("OWNER_USERNAME")
     if ownerUsername == "" { ownerUsername = "owner" }
-    if err := store.BootstrapOwner(ownerUsername, ownerToken, dataKey); err != nil { log.Fatal(err) }
+    if err := store.BootstrapOwner(ownerUsername, os.Getenv("SYNC_TOKEN"), os.Getenv("DATA_KEY")); err != nil { log.Fatal(err) }
+    registrationEnabled := true
+    if value := os.Getenv("ALLOW_REGISTRATION"); value != "" {
+        parsed, err := strconv.ParseBool(value)
+        if err != nil { log.Fatal("ALLOW_REGISTRATION must be true or false") }
+        registrationEnabled = parsed
+    }
     port := os.Getenv("PORT")
     if port == "" { port = "8080" }
     server := &http.Server{
         Addr: ":" + port,
-        Handler: (&Server{adminToken: adminToken, store: store}).routes(),
+        Handler: (&Server{adminToken: adminToken, registrationEnabled: registrationEnabled, store: store}).routes(),
         ReadHeaderTimeout: 5 * time.Second,
-        ReadTimeout: 15 * time.Second,
+        ReadTimeout: 20 * time.Second,
         WriteTimeout: 30 * time.Second,
         IdleTimeout: 60 * time.Second,
     }
-    log.Printf("IdeaVault multi-user sync server listening on :%s", port)
+    log.Printf("IdeaVault sync server listening on :%s (registration=%t)", port, registrationEnabled)
     log.Fatal(server.ListenAndServe())
 }
