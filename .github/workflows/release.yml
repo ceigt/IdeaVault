@@ -40,7 +40,9 @@ jobs:
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/ideavault-release.jks" >> "$GITHUB_ENV"
 
       - name: Build signed release APK
-        run: ./gradlew assembleRelease
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
 
       - name: Name APK
         shell: bash
