@@ -36,7 +36,9 @@ jobs:
           DOMAIN: notes.example.com
           SYNC_TOKEN: 0123456789abcdef0123456789abcdef
           KDF_SALT: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.nginx.yml config --quiet
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
