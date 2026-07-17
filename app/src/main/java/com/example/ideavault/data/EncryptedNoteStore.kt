@@ -78,6 +78,7 @@ class EncryptedNoteStore(private val context: Context) {
                 put("pinned", note.pinned)
                 put("createdAt", note.createdAt)
                 put("updatedAt", note.updatedAt)
+                put("deleted", note.deleted)
             })
         }
     }.toString()
@@ -96,6 +97,7 @@ class EncryptedNoteStore(private val context: Context) {
                         pinned = item.optBoolean("pinned"),
                         createdAt = item.getLong("createdAt"),
                         updatedAt = item.getLong("updatedAt"),
+                        deleted = item.optBoolean("deleted"),
                     ),
                 )
             }

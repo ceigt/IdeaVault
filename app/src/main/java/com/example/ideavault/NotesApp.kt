@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -38,7 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -50,18 +49,17 @@ import java.util.Locale
 
 @Composable
 fun NotesApp(viewModel: NoteViewModel = viewModel()) {
-    val notes by viewModel.notes.collectAsStateWithLifecycle()
+    val allNotes by viewModel.notes.collectAsStateWithLifecycle()
+    val syncState by viewModel.syncState.collectAsStateWithLifecycle()
+    val notes = remember(allNotes) { allNotes.filterNot { it.deleted } }
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var creating by rememberSaveable { mutableStateOf(false) }
+    var showSyncSettings by rememberSaveable { mutableStateOf(false) }
     val editingNote = notes.firstOrNull { it.id == editingId }
 
     if (creating || editingNote != null) {
         EditorScreen(
             note = editingNote,
-            onClose = {
-                creating = false
-                editingId = null
-            },
             onSave = { title, content, sensitive ->
                 viewModel.save(editingId, title, content, sensitive)
                 creating = false
@@ -71,10 +69,28 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
     } else {
         NoteListScreen(
             notes = notes,
+            syncState = syncState,
             onCreate = { creating = true },
             onOpen = { editingId = it.id },
             onPin = { viewModel.togglePinned(it.id) },
             onDelete = { viewModel.delete(it.id) },
+            onSync = { if (syncState.configured) viewModel.syncNow() else showSyncSettings = true },
+            onSyncSettings = { showSyncSettings = true },
+        )
+    }
+
+    if (showSyncSettings) {
+        SyncSettingsDialog(
+            syncState = syncState,
+            onDismiss = { showSyncSettings = false },
+            onSave = { url, token, passphrase ->
+                viewModel.configureAndSync(url, token, passphrase)
+                showSyncSettings = false
+            },
+            onClear = {
+                viewModel.clearSyncConfig()
+                showSyncSettings = false
+            },
         )
     }
 }
@@ -83,10 +99,13 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
 @Composable
 private fun NoteListScreen(
     notes: List<Note>,
+    syncState: SyncUiState,
     onCreate: () -> Unit,
     onOpen: (Note) -> Unit,
     onPin: (Note) -> Unit,
     onDelete: (Note) -> Unit,
+    onSync: () -> Unit,
+    onSyncSettings: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<Note?>(null) }
@@ -99,20 +118,26 @@ private fun NoteListScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = {
-                Column {
-                    Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold)
-                    Text("${notes.size} 条笔记 · 本地加密", style = MaterialTheme.typography.labelMedium)
-                }
-            })
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold)
+                        Text("${notes.size} 条笔记 · ${syncState.message}", style = MaterialTheme.typography.labelMedium)
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onSync, enabled = !syncState.running) {
+                        Text(if (syncState.running) "同步中" else "同步")
+                    }
+                    TextButton(onClick = onSyncSettings) { Text("设置") }
+                },
+            )
         },
         floatingActionButton = {
             FloatingActionButton(onClick = onCreate) { Text("＋", style = MaterialTheme.typography.headlineMedium) }
         },
     ) { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
-        ) {
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -125,10 +150,7 @@ private fun NoteListScreen(
             if (visibleNotes.isEmpty()) {
                 EmptyState(hasQuery = query.isNotBlank(), modifier = Modifier.weight(1f))
             } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
                     items(visibleNotes, key = { it.id }) { note ->
                         NoteCard(note, onOpen, onPin, { pendingDelete = note })
                     }
@@ -142,7 +164,7 @@ private fun NoteListScreen(
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除这条笔记？") },
-            text = { Text("删除后无法恢复。") },
+            text = { Text("删除操作会在下次同步时发送到其他设备。") },
             confirmButton = {
                 TextButton(onClick = { onDelete(note); pendingDelete = null }) { Text("删除") }
             },
@@ -202,7 +224,7 @@ private fun EmptyState(hasQuery: Boolean, modifier: Modifier = Modifier) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EditorScreen(note: Note?, onClose: () -> Unit, onSave: (String, String, Boolean) -> Unit) {
+private fun EditorScreen(note: Note?, onSave: (String, String, Boolean) -> Unit) {
     var title by rememberSaveable(note?.id) { mutableStateOf(note?.title.orEmpty()) }
     var content by rememberSaveable(note?.id) { mutableStateOf(note?.content.orEmpty()) }
     var sensitive by rememberSaveable(note?.id) { mutableStateOf(note?.sensitive ?: false) }
@@ -225,7 +247,6 @@ private fun EditorScreen(note: Note?, onClose: () -> Unit, onSave: (String, Stri
                 placeholder = { Text("标题") },
                 textStyle = MaterialTheme.typography.headlineSmall,
                 singleLine = true,
-                keyboardActions = KeyboardActions(onDone = { }),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(12.dp))
@@ -250,6 +271,53 @@ private fun EditorScreen(note: Note?, onClose: () -> Unit, onSave: (String, Stri
 }
 
 @Composable
+private fun SyncSettingsDialog(
+    syncState: SyncUiState,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String) -> Unit,
+    onClear: () -> Unit,
+) {
+    var serverUrl by rememberSaveable { mutableStateOf(syncState.serverUrl) }
+    var token by rememberSaveable { mutableStateOf("") }
+    var passphrase by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("端到端加密同步") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("服务器只保存密文。访问令牌来自 VPS 的 .env；加密口令不会发送到服务器。")
+                OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it },
+                    label = { Text("服务器地址") },
+                    placeholder = { Text("https://notes.example.com") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = token,
+                    onValueChange = { token = it },
+                    label = { Text("访问令牌") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                OutlinedTextField(
+                    value = passphrase,
+                    onValueChange = { passphrase = it },
+                    label = { Text("加密口令（所有设备一致）") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                if (syncState.configured) {
+                    TextButton(onClick = onClear) { Text("移除同步配置") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(serverUrl, token, passphrase) }) { Text("保存并同步") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
 fun LockScreen(message: String, canAuthenticate: Boolean, onUnlock: () -> Unit, onUnsafeContinue: () -> Unit) {
     Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -259,11 +327,8 @@ fun LockScreen(message: String, canAuthenticate: Boolean, onUnlock: () -> Unit, 
             Spacer(Modifier.height(8.dp))
             Text(message, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(24.dp))
-            if (canAuthenticate) {
-                Button(onClick = onUnlock) { Text("解锁") }
-            } else {
-                Button(onClick = onUnsafeContinue) { Text("继续使用（不安全）") }
-            }
+            if (canAuthenticate) Button(onClick = onUnlock) { Text("解锁") }
+            else Button(onClick = onUnsafeContinue) { Text("继续使用（不安全）") }
         }
     }
 }

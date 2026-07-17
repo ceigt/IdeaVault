@@ -8,4 +8,5 @@ data class Note(
     val pinned: Boolean,
     val createdAt: Long,
     val updatedAt: Long,
+    val deleted: Boolean = false,
 )
