@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">灵感笔记</string>
+    <string name="app_locked_title">灵感笔记已锁定</string>
+    <string name="unlock_app_title">解锁灵感笔记</string>
+</resources>

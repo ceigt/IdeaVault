@@ -87,7 +87,7 @@ class MainActivity : FragmentActivity() {
         )
         prompt.authenticate(
             BiometricPrompt.PromptInfo.Builder()
-                .setTitle("解锁灵感记事")
+                .setTitle(getString(R.string.unlock_app_title))
                 .setSubtitle("使用生物识别或设备锁屏凭据")
                 .setAllowedAuthenticators(authenticators)
                 .build(),

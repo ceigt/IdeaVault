@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IdeaVault</string>
+    <string name="app_locked_title">IdeaVault is locked</string>
+    <string name="unlock_app_title">Unlock IdeaVault</string>
+</resources>

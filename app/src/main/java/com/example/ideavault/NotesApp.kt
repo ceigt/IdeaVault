@@ -36,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,7 +101,7 @@ private fun NoteListScreen(
         topBar = {
             TopAppBar(title = {
                 Column {
-                    Text("灵感记事", fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold)
                     Text("${notes.size} 条笔记 · 本地加密", style = MaterialTheme.typography.labelMedium)
                 }
             })
@@ -254,7 +255,7 @@ fun LockScreen(message: String, canAuthenticate: Boolean, onUnlock: () -> Unit, 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("🔐", style = MaterialTheme.typography.displayMedium)
             Spacer(Modifier.height(20.dp))
-            Text("灵感记事已锁定", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.app_locked_title), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(message, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(24.dp))
