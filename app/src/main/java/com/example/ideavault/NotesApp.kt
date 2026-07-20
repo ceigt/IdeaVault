@@ -25,6 +25,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,7 +52,11 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun NotesApp(viewModel: NoteViewModel = viewModel()) {
+fun NotesApp(
+    lockTimeoutMillis: Long,
+    onLockTimeoutChanged: (Long) -> Unit,
+    viewModel: NoteViewModel = viewModel(),
+) {
     val allNotes by viewModel.notes.collectAsStateWithLifecycle()
     val syncState by viewModel.syncState.collectAsStateWithLifecycle()
     val notes = remember(allNotes) { allNotes.filterNot { it.deleted } }
@@ -59,6 +64,7 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
     var creating by rememberSaveable { mutableStateOf(false) }
     var showSyncSettings by rememberSaveable { mutableStateOf(false) }
     var showServerStatus by rememberSaveable { mutableStateOf(false) }
+    var showAppLockSettings by rememberSaveable { mutableStateOf(false) }
     val editingNote = notes.firstOrNull { it.id == editingId }
 
     if (creating || editingNote != null) {
@@ -79,6 +85,7 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
             onPin = { viewModel.togglePinned(it.id) },
             onDelete = { viewModel.delete(it.id) },
             onAccount = { if (syncState.configured) showServerStatus = true else showSyncSettings = true },
+            onAppLockSettings = { showAppLockSettings = true },
         )
     }
 
@@ -108,6 +115,17 @@ fun NotesApp(viewModel: NoteViewModel = viewModel()) {
             },
         )
     }
+
+    if (showAppLockSettings) {
+        AppLockSettingsDialog(
+            currentTimeoutMillis = lockTimeoutMillis,
+            onDismiss = { showAppLockSettings = false },
+            onSave = { timeoutMillis ->
+                onLockTimeoutChanged(timeoutMillis)
+                showAppLockSettings = false
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -120,6 +138,7 @@ private fun NoteListScreen(
     onPin: (Note) -> Unit,
     onDelete: (Note) -> Unit,
     onAccount: () -> Unit,
+    onAppLockSettings: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<Note?>(null) }
@@ -140,6 +159,9 @@ private fun NoteListScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = onAppLockSettings) {
+                        Text(stringResource(R.string.settings))
+                    }
                     TextButton(onClick = onAccount) {
                         Text(
                             when {
@@ -408,6 +430,66 @@ private fun ServerStatusDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+private data class LockTimeoutChoice(val timeoutMillis: Long, val labelResource: Int)
+
+private val lockTimeoutChoices = listOf(
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_IMMEDIATELY, R.string.timeout_immediately),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_ONE_MINUTE, R.string.timeout_one_minute),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_FIVE_MINUTES, R.string.timeout_five_minutes),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_FIFTEEN_MINUTES, R.string.timeout_fifteen_minutes),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_THIRTY_MINUTES, R.string.timeout_thirty_minutes),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_ONE_HOUR, R.string.timeout_one_hour),
+    LockTimeoutChoice(AppLockPreferences.TIMEOUT_FOUR_HOURS, R.string.timeout_four_hours),
+)
+
+@Composable
+private fun AppLockSettingsDialog(
+    currentTimeoutMillis: Long,
+    onDismiss: () -> Unit,
+    onSave: (Long) -> Unit,
+) {
+    var selectedTimeoutMillis by rememberSaveable(currentTimeoutMillis) {
+        mutableStateOf(currentTimeoutMillis)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.app_lock_settings_title)) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = stringResource(R.string.app_lock_timeout_description),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+                lockTimeoutChoices.forEach { choice ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedTimeoutMillis = choice.timeoutMillis }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = selectedTimeoutMillis == choice.timeoutMillis,
+                            onClick = { selectedTimeoutMillis = choice.timeoutMillis },
+                        )
+                        Text(stringResource(choice.labelResource))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(selectedTimeoutMillis) }) {
+                Text(stringResource(R.string.save))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
     )
 }
 

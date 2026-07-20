@@ -3,4 +3,22 @@
     <string name="app_name">灵感笔记</string>
     <string name="app_locked_title">灵感笔记已锁定</string>
     <string name="unlock_app_title">解锁灵感笔记</string>
+    <string name="lock_message">请验证身份以查看笔记</string>
+    <string name="auth_unavailable_message">设备尚未设置安全锁屏，无法启用应用锁</string>
+    <string name="auth_failed_message">验证失败，请重试</string>
+    <string name="auth_prompt_subtitle">使用生物识别或设备锁屏凭据</string>
+    <string name="settings">设置</string>
+    <string name="app_lock_settings_title">应用锁</string>
+    <string name="app_lock_timeout_description">灵感笔记进入后台后，超过以下时间自动锁定：</string>
+    <string name="timeout_immediately">立即</string>
+    <string name="timeout_one_minute">1 分钟</string>
+    <string name="timeout_five_minutes">5 分钟</string>
+    <string name="timeout_fifteen_minutes">15 分钟</string>
+    <string name="timeout_thirty_minutes">30 分钟</string>
+    <string name="timeout_one_hour">1 小时</string>
+    <string name="timeout_four_hours">4 小时</string>
+    <string name="save">保存</string>
+    <string name="cancel">取消</string>
+    <string name="unlock">解锁</string>
+    <string name="continue_unsafe">继续使用（不安全）</string>
 </resources>

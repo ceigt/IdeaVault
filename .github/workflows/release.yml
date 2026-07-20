@@ -70,7 +70,11 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then VERSION="1.0-${GITHUB_RUN_NUMBER}"; fi
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            APP_VERSION="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)"
+            test -n "$APP_VERSION"
+            VERSION="${APP_VERSION}-${GITHUB_RUN_NUMBER}"
+          fi
           cp app/build/outputs/apk/release/app-release.apk "IdeaVault-${VERSION}.apk"
           echo "APK_NAME=IdeaVault-${VERSION}.apk" >> "$GITHUB_ENV"
 
