@@ -3,4 +3,22 @@
     <string name="app_name">IdeaVault</string>
     <string name="app_locked_title">IdeaVault is locked</string>
     <string name="unlock_app_title">Unlock IdeaVault</string>
+    <string name="lock_message">Verify your identity to view your notes</string>
+    <string name="auth_unavailable_message">No secure device lock is configured, so the app lock is unavailable</string>
+    <string name="auth_failed_message">Authentication failed. Try again</string>
+    <string name="auth_prompt_subtitle">Use biometrics or your device screen lock</string>
+    <string name="settings">Settings</string>
+    <string name="app_lock_settings_title">App lock</string>
+    <string name="app_lock_timeout_description">Lock after IdeaVault has been in the background for:</string>
+    <string name="timeout_immediately">Immediately</string>
+    <string name="timeout_one_minute">1 minute</string>
+    <string name="timeout_five_minutes">5 minutes</string>
+    <string name="timeout_fifteen_minutes">15 minutes</string>
+    <string name="timeout_thirty_minutes">30 minutes</string>
+    <string name="timeout_one_hour">1 hour</string>
+    <string name="timeout_four_hours">4 hours</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="unlock">Unlock</string>
+    <string name="continue_unsafe">Continue without protection</string>
 </resources>
