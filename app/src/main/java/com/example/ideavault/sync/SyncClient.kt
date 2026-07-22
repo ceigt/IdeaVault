@@ -27,6 +27,11 @@ class SyncClient {
         val response = JSONObject(request("POST", "$baseUrl/v1/auth/$endpoint", body = payload))
         return AuthResult(response.getString("accessToken"), response.getString("username"))
     }
+
+    fun logout(config: SyncConfig) {
+        val baseUrl = config.serverUrl.trim().trimEnd('/')
+        request("POST", "$baseUrl/v1/auth/logout", config.accessToken)
+    }
     fun sync(config: SyncConfig, localNotes: List<Note>): SyncResult {
         val baseUrl = config.serverUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("https://")) { "服务器地址必须使用 HTTPS" }
