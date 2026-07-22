@@ -13,6 +13,7 @@ import (
     "log"
     "net"
     "net/http"
+    "net/netip"
     "os"
     "path/filepath"
     "regexp"
@@ -28,6 +29,7 @@ import (
 const (
     maxBodyBytes = 10 << 20
     maxSessions = 10
+    defaultSessionTTL = 30 * 24 * time.Hour
     argonTime uint32 = 2
     argonMemory uint32 = 32 * 1024
     argonThreads uint8 = 1
@@ -58,10 +60,16 @@ type UserRecord struct {
     Username string `json:"username"`
     TokenHash string `json:"tokenHash,omitempty"`
     SessionHashes []string `json:"sessionHashes,omitempty"`
+    Sessions []SessionRecord `json:"sessions,omitempty"`
     PasswordHash string `json:"passwordHash,omitempty"`
     DataKey string `json:"dataKey"`
     KeyID string `json:"keyId,omitempty"`
     Notes map[string]Envelope `json:"notes"`
+}
+
+type SessionRecord struct {
+    TokenHash string `json:"tokenHash"`
+    ExpiresAt int64 `json:"expiresAt"`
 }
 
 type diskState struct { Users map[string]*UserRecord `json:"users"` }
@@ -72,10 +80,12 @@ type Store struct {
     path string
     users map[string]*UserRecord
     legacy *legacyDiskState
+    sessionTTL time.Duration
+    now func() time.Time
 }
 
 func NewStore(path string) (*Store, error) {
-    store := &Store{path: path, users: make(map[string]*UserRecord)}
+    store := &Store{path: path, users: make(map[string]*UserRecord), sessionTTL: defaultSessionTTL, now: time.Now}
     if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil { return nil, err }
     data, err := os.ReadFile(path)
     if errors.Is(err, os.ErrNotExist) { return store, nil }
@@ -86,6 +96,9 @@ func NewStore(path string) (*Store, error) {
         store.users = state.Users
         for _, user := range store.users {
             if user.Notes == nil { user.Notes = make(map[string]Envelope) }
+            // Pre-v2.4 session hashes have no issue time, so they cannot be safely assigned a TTL.
+            // Invalidate them during migration and require a fresh login.
+            user.SessionHashes = nil
         }
         return store, nil
     }
@@ -114,7 +127,7 @@ func (s *Store) BootstrapOwner(username, token, dataKey string) error {
         s.users[username] = record
     }
     if record.DataKey != "" && record.DataKey != dataKey && len(record.Notes) > 0 { return errors.New("DATA_KEY does not match existing owner data") }
-    record.TokenHash = hashToken(token)
+    if record.PasswordHash == "" { record.TokenHash = hashToken(token) } else { record.TokenHash = "" }
     record.DataKey = dataKey
     return s.saveLocked()
 }
@@ -125,7 +138,7 @@ func (s *Store) Register(username, password string) (string, error) {
     if err := validatePassword(password); err != nil { return "", err }
     passwordHash, err := hashPassword(password)
     if err != nil { return "", err }
-    token, tokenHash, err := newSessionToken()
+    token, session, err := s.newSession()
     if err != nil { return "", err }
     keyBytes := make([]byte, 32)
     if _, err := rand.Read(keyBytes); err != nil { return "", err }
@@ -134,7 +147,7 @@ func (s *Store) Register(username, password string) (string, error) {
     if _, exists := s.users[username]; exists { return "", errors.New("用户名已存在") }
     s.users[username] = &UserRecord{
         Username: username,
-        SessionHashes: []string{tokenHash},
+        Sessions: []SessionRecord{session},
         PasswordHash: passwordHash,
         DataKey: base64.StdEncoding.EncodeToString(keyBytes),
         Notes: make(map[string]Envelope),
@@ -156,14 +169,15 @@ func (s *Store) Login(username, password string) (string, error) {
         return "", errors.New("用户名或密码错误")
     }
     if !verifyPassword(password, encodedHash) { return "", errors.New("用户名或密码错误") }
-    token, tokenHash, err := newSessionToken()
+    token, session, err := s.newSession()
     if err != nil { return "", err }
     s.mu.Lock()
     defer s.mu.Unlock()
     user, exists = s.users[username]
     if !exists || user.PasswordHash != encodedHash { return "", errors.New("用户名或密码错误") }
-    user.SessionHashes = append(user.SessionHashes, tokenHash)
-    if len(user.SessionHashes) > maxSessions { user.SessionHashes = user.SessionHashes[len(user.SessionHashes)-maxSessions:] }
+    user.Sessions = pruneSessions(user.Sessions, s.now().UnixMilli())
+    user.Sessions = append(user.Sessions, session)
+    if len(user.Sessions) > maxSessions { user.Sessions = user.Sessions[len(user.Sessions)-maxSessions:] }
     if err := s.saveLocked(); err != nil { return "", err }
     return token, nil
 }
@@ -177,6 +191,9 @@ func (s *Store) SetPassword(username, password string) error {
     user, exists := s.users[username]
     if !exists { return errors.New("unknown user") }
     user.PasswordHash = encodedHash
+    user.TokenHash = ""
+    user.SessionHashes = nil
+    user.Sessions = nil
     return s.saveLocked()
 }
 
@@ -206,14 +223,32 @@ func activeNoteCount(notes map[string]Envelope) int {
 func (s *Store) Authenticate(token string) (string, bool) {
     supplied := hashToken(token)
     s.mu.Lock()
+    now := s.now().UnixMilli()
     defer s.mu.Unlock()
     for username, user := range s.users {
-        if secureHashEqual(supplied, user.TokenHash) { return username, true }
-        for _, sessionHash := range user.SessionHashes {
-            if secureHashEqual(supplied, sessionHash) { return username, true }
+        if user.PasswordHash == "" && secureHashEqual(supplied, user.TokenHash) { return username, true }
+        for _, session := range user.Sessions {
+            if session.ExpiresAt > now && secureHashEqual(supplied, session.TokenHash) { return username, true }
         }
     }
     return "", false
+}
+
+func (s *Store) Logout(token string) error {
+    supplied := hashToken(token)
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    changed := false
+    for _, user := range s.users {
+        kept := user.Sessions[:0]
+        for _, session := range user.Sessions {
+            if secureHashEqual(supplied, session.TokenHash) { changed = true; continue }
+            kept = append(kept, session)
+        }
+        user.Sessions = kept
+    }
+    if changed { return s.saveLocked() }
+    return nil
 }
 
 func (s *Store) Config(username string) (string, bool) {
@@ -237,6 +272,8 @@ func (s *Store) Merge(username, keyID string, incoming []Envelope) ([]Envelope, 
     for _, note := range incoming {
         if err := validateEnvelope(note); err != nil { return nil, err }
         current, exists := user.Notes[note.ID]
+        // Ciphertext ordering has no business meaning; it is only a stable tiebreaker so
+        // concurrent writes with the same millisecond timestamp converge on every client.
         if !exists || note.UpdatedAt > current.UpdatedAt || (note.UpdatedAt == current.UpdatedAt && note.Ciphertext > current.Ciphertext) ||
             (note.UpdatedAt == current.UpdatedAt && note.Ciphertext == current.Ciphertext && !current.Deleted && note.Deleted) {
             user.Notes[note.ID] = note
@@ -304,11 +341,17 @@ func verifyPassword(password, encoded string) bool {
     return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
-func newSessionToken() (string, string, error) {
+func (s *Store) newSession() (string, SessionRecord, error) {
     tokenBytes := make([]byte, 32)
-    if _, err := rand.Read(tokenBytes); err != nil { return "", "", err }
+    if _, err := rand.Read(tokenBytes); err != nil { return "", SessionRecord{}, err }
     token := hex.EncodeToString(tokenBytes)
-    return token, hashToken(token), nil
+    return token, SessionRecord{TokenHash: hashToken(token), ExpiresAt: s.now().Add(s.sessionTTL).UnixMilli()}, nil
+}
+
+func pruneSessions(sessions []SessionRecord, now int64) []SessionRecord {
+    kept := sessions[:0]
+    for _, session := range sessions { if session.ExpiresAt > now { kept = append(kept, session) } }
+    return kept
 }
 
 func normalizeUsername(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
@@ -318,6 +361,7 @@ func secureHashEqual(left, right string) bool { return len(left) == len(right) &
 type contextKey string
 const usernameContextKey contextKey = "username"
 
+const tokenContextKey contextKey = "token"
 type authAttempt struct { windowStart time.Time; count int }
 
 type Server struct {
@@ -325,6 +369,7 @@ type Server struct {
     registrationEnabled bool
     store *Store
     attemptMu sync.Mutex
+    trustedProxyCIDRs []netip.Prefix
     attempts map[string]authAttempt
 }
 
@@ -336,17 +381,17 @@ func (s *Server) routes() http.Handler {
     mux.HandleFunc("POST /v1/auth/login", s.login)
     mux.Handle("POST /v1/auth/password", s.userAuth(http.HandlerFunc(s.setPassword)))
     mux.Handle("GET /v1/config", s.userAuth(http.HandlerFunc(s.config)))
+    mux.Handle("POST /v1/auth/logout", s.userAuth(http.HandlerFunc(s.logout)))
     mux.Handle("POST /v1/sync", s.userAuth(http.HandlerFunc(s.sync)))
     mux.Handle("GET /v1/admin/users", s.adminAuth(http.HandlerFunc(s.listUsers)))
     return securityHeaders(mux)
 }
 
 func (s *Server) allowAuthAttempt(r *http.Request) bool {
-    host, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err != nil { host = r.RemoteAddr }
-    if forwarded := strings.TrimSpace(r.Header.Get("X-Real-IP")); forwarded != "" { host = forwarded }
+    host := s.clientAddress(r)
     now := time.Now()
     s.attemptMu.Lock()
+    if s.attempts == nil { s.attempts = make(map[string]authAttempt) }
     defer s.attemptMu.Unlock()
     if len(s.attempts) > 10000 {
         for address, existing := range s.attempts {
@@ -358,6 +403,22 @@ func (s *Server) allowAuthAttempt(r *http.Request) bool {
     attempt.count++
     s.attempts[host] = attempt
     return attempt.count <= 20
+}
+
+func (s *Server) clientAddress(r *http.Request) string {
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil { host = strings.Trim(r.RemoteAddr, "[]") }
+    peer, err := netip.ParseAddr(host)
+    if err != nil { return host }
+    peer = peer.Unmap()
+    for _, trusted := range s.trustedProxyCIDRs {
+        if trusted.Contains(peer) {
+            forwarded, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP")))
+            if err == nil { return forwarded.Unmap().String() }
+            break
+        }
+    }
+    return peer.String()
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +455,9 @@ func (s *Server) userAuth(next http.Handler) http.Handler {
         token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
         username, ok := s.store.Authenticate(token)
         if !ok { writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "登录已失效，请重新登录"}); return }
-        next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), usernameContextKey, username)))
+        ctx := context.WithValue(r.Context(), usernameContextKey, username)
+        ctx = context.WithValue(ctx, tokenContextKey, token)
+        next.ServeHTTP(w, r.WithContext(ctx))
     })
 }
 
@@ -407,6 +470,12 @@ func (s *Server) adminAuth(next http.Handler) http.Handler {
 }
 
 func requestUsername(r *http.Request) string { value, _ := r.Context().Value(usernameContextKey).(string); return value }
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+    token, _ := r.Context().Value(tokenContextKey).(string)
+    if err := s.store.Logout(token); err != nil { writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "logout failed"}); return }
+    writeJSON(w, http.StatusOK, map[string]string{"status": "logged-out"})
+}
 
 func (s *Server) setPassword(w http.ResponseWriter, r *http.Request) {
     r.Body = http.MaxBytesReader(w, r.Body, 4096)
@@ -457,6 +526,15 @@ func main() {
     if dataPath == "" { dataPath = "/data/notes.json" }
     store, err := NewStore(dataPath)
     if err != nil { log.Fatal(err) }
+    sessionTTLHours := 720
+    if value := os.Getenv("SESSION_TTL_HOURS"); value != "" {
+        parsed, err := strconv.Atoi(value)
+        if err != nil || parsed < 1 || parsed > 8760 { log.Fatal("SESSION_TTL_HOURS must be an integer from 1 to 8760") }
+        sessionTTLHours = parsed
+    }
+    store.sessionTTL = time.Duration(sessionTTLHours) * time.Hour
+    trustedProxyCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+    if err != nil { log.Fatal(err) }
     ownerUsername := os.Getenv("OWNER_USERNAME")
     if ownerUsername == "" { ownerUsername = "owner" }
     if err := store.BootstrapOwner(ownerUsername, os.Getenv("SYNC_TOKEN"), os.Getenv("DATA_KEY")); err != nil { log.Fatal(err) }
@@ -470,12 +548,23 @@ func main() {
     if port == "" { port = "8080" }
     server := &http.Server{
         Addr: ":" + port,
-        Handler: (&Server{adminToken: adminToken, registrationEnabled: registrationEnabled, store: store}).routes(),
+        Handler: (&Server{adminToken: adminToken, registrationEnabled: registrationEnabled, store: store, trustedProxyCIDRs: trustedProxyCIDRs}).routes(),
         ReadHeaderTimeout: 5 * time.Second,
         ReadTimeout: 20 * time.Second,
         WriteTimeout: 30 * time.Second,
         IdleTimeout: 60 * time.Second,
     }
-    log.Printf("IdeaVault sync server listening on :%s (registration=%t)", port, registrationEnabled)
+    log.Printf("IdeaVault sync server listening on :%s (registration=%t, session_ttl_hours=%d, trusted_proxies=%d)", port, registrationEnabled, sessionTTLHours, len(trustedProxyCIDRs))
     log.Fatal(server.ListenAndServe())
+}
+func parseTrustedProxyCIDRs(value string) ([]netip.Prefix, error) {
+    if strings.TrimSpace(value) == "" { return nil, nil }
+    parts := strings.Split(value, ",")
+    result := make([]netip.Prefix, 0, len(parts))
+    for _, part := range parts {
+        prefix, err := netip.ParsePrefix(strings.TrimSpace(part))
+        if err != nil { return nil, fmt.Errorf("invalid TRUSTED_PROXY_CIDRS entry %q", strings.TrimSpace(part)) }
+        result = append(result, prefix)
+    }
+    return result, nil
 }

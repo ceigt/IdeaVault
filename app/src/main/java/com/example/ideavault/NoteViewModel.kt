@@ -165,7 +165,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun clearSyncConfig() {
         autoSyncJob?.cancel()
         syncRequestedWhileRunning = false
-        viewModelScope.launch(Dispatchers.IO) { syncConfigStore.clear() }
+        viewModelScope.launch(Dispatchers.IO) {
+            val config = syncConfigStore.load()
+            syncConfigStore.clear()
+            if (config != null) runCatching { syncClient.logout(config) }
+        }
         _syncState.value = SyncUiState(message = "同步配置已移除，本地笔记不受影响")
     }
 
